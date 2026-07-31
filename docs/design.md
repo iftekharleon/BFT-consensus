@@ -83,10 +83,110 @@ claims.
 
 ## 3. Protocol Description
 
-*(To be completed in M2, alongside `consensus/types.go`, `vote.go`, and
-`quorum.go` — the round state machine, the three per-round steps, round
-change, and the locking rule, with the state diagram from the project spec
-included and referenced against the actual Go types once they exist.)*
+Each **height** (block number) may take multiple **rounds** to commit. A round
+moves through three steps — `StepPropose`, `StepPrevote`, `StepPrecommit`
+(see `consensus/types.go`'s `Step` enum) — and either concludes with a commit
+or falls through to a round change:
+
+```
+                    ┌──────────────────────────────────────┐
+                    │  NewHeight(H)                        │
+                    └───────────────┬──────────────────────┘
+                                    ▼
+                    ┌──────────────────────────────────────┐
+      ┌────────────▶│  PROPOSE (round R)                   │
+      │             │  proposer = validators[(H+R) % N]    │
+      │             │  proposer broadcasts Proposal(block) │
+      │             └───────────────┬──────────────────────┘
+      │                             ▼
+      │             ┌──────────────────────────────────────┐
+      │             │  PREVOTE                              │
+      │             │  valid proposal? → prevote(blockHash) │
+      │             │  invalid/timeout? → prevote(NIL)      │
+      │             └───────────────┬──────────────────────┘
+      │                             ▼
+      │             ┌──────────────────────────────────────┐
+      │             │  PRECOMMIT                            │
+      │             │  saw 2f+1 prevotes for X?             │
+      │             │    → lock on X, precommit(X)          │
+      │             │  else → precommit(NIL)                │
+      │             └───────────────┬──────────────────────┘
+      │                             ▼
+      │                   ┌─────────────────┐
+      │                   │ 2f+1 precommits │
+      │            no ────│   for same X?   │──── yes
+      │            │      └─────────────────┘       │
+      │            ▼                                ▼
+      │   ┌─────────────────┐            ┌─────────────────────┐
+      └───│ ROUND CHANGE    │            │  COMMIT block X     │
+          │ R = R + 1       │            │  H = H + 1, R = 0   │
+          │ timeout *= 1.5  │            └─────────────────────┘
+          └─────────────────┘                      │
+                    ▲                              │
+                    └──────────────────────────────┘
+```
+
+**Proposer selection** is deterministic round-robin, `validator.Set.Proposer(h,
+r)` — every honest node computes the same proposer for the same (height,
+round) without any coordination message, because both the validator ordering
+(sorted by address, §2 of this doc / `validator/set.go`) and the rotation
+formula are pure functions of public information.
+
+**Votes** (`consensus/vote.go`) are the atoms of the protocol. A prevote or
+precommit is either for a specific block hash or is a **NIL vote**
+(`Vote.BlockHash` empty). NIL is a first-class, actively-cast vote, not the
+absence of one — a validator that sees no valid proposal, or whose step times
+out, casts NIL rather than staying silent, and NIL votes count toward the
+2f+1 needed to conclude a round (`VoteSet.HasTwoThirdsAny`, §3.5 /
+`consensus/quorum.go`). This distinction — silence stalls, NIL progresses —
+is what makes the protocol live under a faulty or absent leader: a round
+always reaches a conclusion in bounded time regardless of what the proposer
+does.
+
+**Quorum aggregation** (`consensus/quorum.go`'s `VoteSet`) tracks accumulated
+voting power per block hash as votes arrive, and exposes two distinct
+questions: `HasTwoThirdsMajority()` — did 2f+1 power converge on one block? —
+and `HasTwoThirdsAny()` — did 2f+1 power vote at all, converged or not? Both
+are needed: the FSM commits (or locks) only on the former, but advances past
+a round on the latter even when votes split across multiple blocks or NIL.
+Conflating them is a liveness bug (a legitimately split round would never be
+recognized as concluded).
+
+### Locking — the safety mechanism (read this twice)
+
+This is the part everyone gets wrong, and the part a good reviewer probes.
+
+When a validator sees `2f+1` prevotes for block `X` in round `R`, it **locks**
+on `X`:
+
+```go
+lockedBlock = X
+lockedRound = R
+```
+
+Once locked, in all future rounds, the validator will **only prevote for
+`X`** — unless it sees a valid Proof-of-Lock-Change (a `2f+1` prevote set for
+a different block from a round **later** than `lockedRound`, carried in a
+re-proposal's `Proposal.POLRound` field).
+
+**Why this matters:** if `2f+1` nodes prevoted for `X` in round 5, then at
+least `f+1` honest nodes locked on `X` (§4 works out the exact intersection
+argument). Any future quorum of `2f+1` must intersect that `f+1` set by at
+least one honest node — who will refuse to prevote for anything else. So no
+conflicting block can ever gather `2f+1`. That intersection argument is the
+entire safety proof.
+
+**Unlocking** happens only on seeing a `2f+1` prevote set (a "polka") for a
+different block at a round strictly greater than `lockedRound`. This
+preserves liveness — otherwise a node locked on a block nobody else has could
+stall forever, since it would never again agree to anything.
+
+The lock **survives round change** (`enterNewRound` clears the current
+`proposal` but never `lockedBlock`/`lockedRound`) and clears **only** on
+commit. Clearing it on round change, or forgetting to re-propose the locked
+block when this node is the proposer again, is the single most common way to
+break safety in this protocol family — see `consensus/state.go` and its
+round-change regression test (M3) for where this is enforced in code.
 
 ## 4. Safety Argument
 
