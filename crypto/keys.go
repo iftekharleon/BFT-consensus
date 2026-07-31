@@ -48,6 +48,14 @@ func (p PrivKey) Sign(msg []byte) []byte {
 	return ed25519.Sign(ed25519.PrivateKey(p), msg)
 }
 
+// Public derives the public key corresponding to this private key. ed25519
+// private keys already embed their public key in their encoding, so this
+// is a pure extraction, not a computation — needed by cmd/node to
+// determine this validator's own identity from a loaded key file.
+func (p PrivKey) Public() PubKey {
+	return PubKey(ed25519.PrivateKey(p).Public().(ed25519.PublicKey))
+}
+
 // Verify reports whether sig is a valid signature of msg by the public key.
 func (p PubKey) Verify(msg, sig []byte) bool {
 	if len(p) != ed25519.PublicKeySize {

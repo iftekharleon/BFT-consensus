@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 
 	"github.com/ileon/bft-consensus/crypto"
@@ -67,6 +68,38 @@ func NewBlock(h Header, txs [][]byte) *Block {
 // Hash returns the block's cached hash.
 func (b *Block) Hash() []byte {
 	return b.hash
+}
+
+// blockWire is Block's on-the-wire JSON shape: Header and Txs only.
+// Hash is deliberately never serialized — see UnmarshalJSON.
+type blockWire struct {
+	Header Header
+	Txs    [][]byte
+}
+
+// MarshalJSON encodes only Header and Txs. The cached hash field is
+// unexported and would otherwise be silently dropped by encoding/json
+// on the way out and left nil on the way in; without custom
+// (Un)MarshalJSON, a Block that round-trips through JSON (as every
+// Proposal does over the network) would come back with Hash() == nil
+// and fail every downstream comparison against BlockHash.
+func (b *Block) MarshalJSON() ([]byte, error) {
+	return json.Marshal(blockWire{Header: b.Header, Txs: b.Txs})
+}
+
+// UnmarshalJSON reconstructs the block via NewBlock, which always
+// recomputes TxRoot and the block hash from the actual Header/Txs rather
+// than trusting any serialized value for them. This is not just a
+// round-trip correctness fix: it also means a peer cannot lie about a
+// block's hash or tx root in transit — both are independently
+// re-derived from the data that was actually sent.
+func (b *Block) UnmarshalJSON(data []byte) error {
+	var w blockWire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*b = *NewBlock(w.Header, w.Txs)
+	return nil
 }
 
 // ComputeTxRoot computes a simple binary Merkle root over the given

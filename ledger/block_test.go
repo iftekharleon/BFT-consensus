@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 
 	"github.com/ileon/bft-consensus/crypto"
@@ -111,5 +112,34 @@ func TestValidateAgainstParent(t *testing.T) {
 	staleTimestamp := NewBlock(Header{Height: 2, Timestamp: 100, ParentHash: parent.Hash(), Proposer: addr}, nil)
 	if err := staleTimestamp.ValidateAgainstParent(parent); err != ErrTimestampNotIncreasing {
 		t.Fatalf("expected ErrTimestampNotIncreasing, got %v", err)
+	}
+}
+
+func TestBlockJSONRoundTripPreservesHash(t *testing.T) {
+	addr := testProposerAddr(t)
+	parentHash := make([]byte, hashSize)
+	original := NewBlock(Header{Height: 1, Timestamp: 100, ParentHash: parentHash, Proposer: addr}, [][]byte{[]byte("tx1"), []byte("tx2")})
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var decoded Block
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if decoded.Hash() == nil {
+		t.Fatal("expected decoded block to have a non-nil hash")
+	}
+	if !bytes.Equal(decoded.Hash(), original.Hash()) {
+		t.Fatal("expected decoded block's hash to match the original")
+	}
+	if decoded.Header.Height != original.Header.Height {
+		t.Fatal("expected decoded header to match original")
+	}
+	if len(decoded.Txs) != 2 {
+		t.Fatalf("expected 2 txs after round-trip, got %d", len(decoded.Txs))
 	}
 }

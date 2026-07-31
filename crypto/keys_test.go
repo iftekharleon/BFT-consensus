@@ -76,3 +76,14 @@ func TestAddressIsStableAndTwentyBytes(t *testing.T) {
 		t.Fatalf("expected %d hex chars, got %d", addressSize*2, len(addr1))
 	}
 }
+
+func TestPrivKeyPublicMatchesGeneratedPubKey(t *testing.T) {
+	priv, pub, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	derived := priv.Public()
+	if derived.Address() != pub.Address() {
+		t.Fatal("expected PrivKey.Public() to match the pubkey returned by GenerateKeyPair")
+	}
+}
