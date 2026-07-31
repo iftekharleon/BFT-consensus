@@ -1,0 +1,10 @@
+/bin/
+.claude/
+*.test
+*.out
+coverage.txt
+coverage.html
+.idea/
+.vscode/
+*.swp
+.DS_Store
