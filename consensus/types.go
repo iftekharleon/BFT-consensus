@@ -6,9 +6,26 @@ package consensus
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 
 	"github.com/ileon/bft-consensus/crypto"
 	"github.com/ileon/bft-consensus/ledger"
+)
+
+var (
+	// ErrWrongProposer is returned when a proposal's Proposer does not
+	// match the validator set's deterministic proposer for that
+	// (height, round).
+	ErrWrongProposer = errors.New("consensus: proposal is not from the expected proposer")
+
+	// ErrInvalidProposalSignature is returned when a proposal's
+	// signature does not verify against its claimed proposer's public
+	// key.
+	ErrInvalidProposalSignature = errors.New("consensus: proposal signature is invalid")
+
+	// ErrProposalBlockMismatch is returned when a proposal's attached
+	// Block does not hash to its claimed BlockHash.
+	ErrProposalBlockMismatch = errors.New("consensus: proposal block does not match block hash")
 )
 
 // Step is a phase within a single consensus round.
