@@ -1,0 +1,26 @@
+{
+  "chain_id": "bft-consensus-example",
+  "validators": [
+    {
+      "address": "84c78635a0fa02ec5b31cb27de2cdcdd5e210270",
+      "pub_key": "18d5c4ab7821ad531a5db63dd39286db677b7105b28b1e0c0f1ce374b14d029f",
+      "voting_power": 1
+    },
+    {
+      "address": "badc3beb9da38bdd59a27f9b439b6d84860e2255",
+      "pub_key": "dc2ac0ee99c735d954dab6fce2bd409d6935056ce5eab2086f51b1dff239323a",
+      "voting_power": 1
+    },
+    {
+      "address": "a2ac9566034d1426a80238843142e5119a72c8c2",
+      "pub_key": "7eb4072004c10656cf60cb3b8185823db1b82cd95796f760441d25c60345675c",
+      "voting_power": 1
+    },
+    {
+      "address": "1c1aaf15035220d4ae4e569a41e190d88f80084d",
+      "pub_key": "40c290f3700fe4f88dbbf901c2300871492e1fe9821ce86e74f4d441836b71b9",
+      "voting_power": 1
+    }
+  ],
+  "timestamp": 1785512905
+}
