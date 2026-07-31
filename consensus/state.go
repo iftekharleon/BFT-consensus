@@ -75,11 +75,24 @@ type State struct {
 	self    crypto.Address
 	chainID string
 
-	proposal    *Proposal
-	lockedBlock *ledger.Block
-	lockedRound int32
-	validBlock  *ledger.Block
-	validRound  int32
+	proposal *Proposal
+	// bufferedProposal holds at most one proposal for height+1, round 0
+	// — the only "future" proposal shape that's fully identity-checkable
+	// ahead of time (round 0's proposer for the next height is already
+	// determined). A fast peer can finish a height and broadcast the
+	// next height's proposal before this node has even entered it;
+	// dropping that proposal outright (as opposed to buffering it) means
+	// this node can later learn the winning block hash via *votes* from
+	// peers who did have it, reach precommit quorum on that hash, and
+	// then have no way to actually resolve the block content — a
+	// permanent stall in enterCommit. Buffering one height ahead closes
+	// that gap. See enterNewHeight, and the spec's own "buffer future
+	// messages, don't drop them" rule (PROJECT_SPEC.md §3.6 rule 1).
+	bufferedProposal *Proposal
+	lockedBlock      *ledger.Block
+	lockedRound      int32
+	validBlock       *ledger.Block
+	validRound       int32
 
 	prevotes   map[uint32]*VoteSet
 	precommits map[uint32]*VoteSet
@@ -185,6 +198,16 @@ func (s *State) CommitOut() <-chan *ledger.Block {
 	return s.commitOut
 }
 
+// TimeoutChan is the channel of fired Timeouts. A driver (cmd/node's
+// message pump in M6, sim/harness.go in M7, or a test wiring its own
+// cluster) must read this and feed every value into HandleTimeout —
+// without that, a node that misses a message over the network has no
+// way to recover via timeout at all, since nothing else would ever call
+// HandleTimeout for it.
+func (s *State) TimeoutChan() <-chan Timeout {
+	return s.timeouts.Chan()
+}
+
 // HandleProposal processes a proposal received from the network (or, for
 // this node's own proposals, is bypassed in favor of directly setting
 // s.proposal — see enterPropose).
@@ -246,13 +269,59 @@ func (s *State) handleProposalLocked(p *Proposal) error {
 	if p.Height < s.height || (p.Height == s.height && p.Round < s.round) {
 		return nil
 	}
-	if p.Height != s.height {
-		// Future-height proposals are not buffered in this
-		// implementation (only future-round votes/proposals within the
-		// current height are); see docs/design.md §7.
+
+	if p.Height == s.height+1 && p.Round == 0 {
+		// Buffer it — see the bufferedProposal field doc for why this
+		// matters. We can check everything except ValidateAgainstParent
+		// here (our store hasn't reached that parent yet); that check
+		// happens in enterNewHeight once it has.
+		if err := s.validateProposalIdentity(p); err != nil {
+			return err
+		}
+		if s.bufferedProposal == nil || s.bufferedProposal.Height != p.Height {
+			s.bufferedProposal = p
+		}
 		return nil
 	}
 
+	if p.Height != s.height {
+		// Anything further out than one height ahead is not buffered;
+		// see docs/design.md §7.
+		return nil
+	}
+
+	if err := s.validateProposalIdentity(p); err != nil {
+		s.maybeAdvancePastInvalidProposal(p.Round)
+		return err
+	}
+	if err := p.Block.ValidateAgainstParent(s.store.Head()); err != nil {
+		s.maybeAdvancePastInvalidProposal(p.Round)
+		return err
+	}
+
+	if p.Round != s.round {
+		// Future-round proposal within this height: not buffered; it
+		// will need to be resent once we reach that round.
+		return nil
+	}
+	if s.proposal != nil {
+		return nil // already have a proposal for this round
+	}
+
+	s.proposal = p
+	s.logTransition("received-proposal", p.BlockHash)
+	if s.step == StepPropose {
+		s.enterPrevote(s.round)
+	}
+	return nil
+}
+
+// validateProposalIdentity checks everything about a proposal that
+// doesn't require chain context: proposer identity and signature, and
+// the attached block's self-contained validity. It deliberately excludes
+// ValidateAgainstParent, which needs this node's own current head — not
+// yet available when validating a buffered next-height proposal.
+func (s *State) validateProposalIdentity(p *Proposal) error {
 	proposerVal, ok := s.valSet.GetByAddress(p.Proposer)
 	if !ok {
 		return ErrNotAValidator
@@ -267,31 +336,7 @@ func (s *State) handleProposalLocked(p *Proposal) error {
 	if p.Block == nil || !bytes.Equal(p.Block.Hash(), p.BlockHash) {
 		return ErrProposalBlockMismatch
 	}
-
-	if err := p.Block.ValidateBasic(); err != nil {
-		s.maybeAdvancePastInvalidProposal(p.Round)
-		return err
-	}
-	if err := p.Block.ValidateAgainstParent(s.store.Head()); err != nil {
-		s.maybeAdvancePastInvalidProposal(p.Round)
-		return err
-	}
-
-	if p.Round != s.round {
-		// Future-round proposal: not buffered (see note above); it will
-		// need to be resent once we reach that round.
-		return nil
-	}
-	if s.proposal != nil {
-		return nil // already have a proposal for this round
-	}
-
-	s.proposal = p
-	s.logTransition("received-proposal", p.BlockHash)
-	if s.step == StepPropose {
-		s.enterPrevote(s.round)
-	}
-	return nil
+	return p.Block.ValidateBasic()
 }
 
 // maybeAdvancePastInvalidProposal moves straight to prevote (which will
@@ -377,6 +422,15 @@ func (s *State) enterNewHeight(h uint64) {
 	s.prevotes = make(map[uint32]*VoteSet)
 	s.precommits = make(map[uint32]*VoteSet)
 	s.logTransition("new-height", nil)
+
+	if s.bufferedProposal != nil && s.bufferedProposal.Height == h {
+		buffered := s.bufferedProposal
+		s.bufferedProposal = nil
+		if err := buffered.Block.ValidateAgainstParent(s.store.Head()); err == nil {
+			s.proposal = buffered
+		}
+	}
+
 	s.enterPropose(0)
 }
 
@@ -390,6 +444,12 @@ func (s *State) enterPropose(round uint32) {
 	proposer := s.valSet.Proposer(s.height, round)
 	if proposer.Address != s.self {
 		s.timeouts.Schedule(Timeout{Height: s.height, Round: round, Step: StepPropose, Duration: s.proposeTimeout})
+		if s.proposal != nil {
+			// A buffered proposal was already promoted for this
+			// (height, round) by enterNewHeight — no need to wait.
+			s.logTransition("received-proposal", s.proposal.BlockHash)
+			s.enterPrevote(round)
+		}
 		return
 	}
 
@@ -509,6 +569,15 @@ func (s *State) enterCommit(round uint32, hash []byte) {
 
 	block := s.blockForHash(hash)
 	if block == nil {
+		// We have quorum proof of the winning hash (via votes from
+		// peers who had the content) but never received the proposal
+		// itself. There is no block-fetch/sync mechanism in this
+		// implementation (see docs/design.md §7, Known Limitations) —
+		// this node is stuck at this height until it happens to receive
+		// a matching proposal some other way (e.g. a future round's
+		// re-proposal). Log loudly rather than stalling silently.
+		slog.Warn("consensus: reached precommit quorum for a block we never received",
+			"self", shortAddr(s.self), "height", s.height, "round", round, "blockHash", shortHash(hash))
 		return
 	}
 	if err := s.store.Append(block); err != nil {
@@ -602,12 +671,21 @@ func (s *State) proposalHasValidPOL(p *Proposal) bool {
 
 func (s *State) logTransition(action string, blockHash []byte) {
 	slog.Info("consensus transition",
+		"self", shortAddr(s.self),
 		"height", s.height,
 		"round", s.round,
 		"step", s.step,
 		"action", action,
 		"blockHash", shortHash(blockHash),
 	)
+}
+
+func shortAddr(a crypto.Address) string {
+	s := string(a)
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 func shortHash(h []byte) string {
