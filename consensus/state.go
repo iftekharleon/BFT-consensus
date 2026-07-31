@@ -443,7 +443,7 @@ func (s *State) enterPropose(round uint32) {
 
 	proposer := s.valSet.Proposer(s.height, round)
 	if proposer.Address != s.self {
-		s.timeouts.Schedule(Timeout{Height: s.height, Round: round, Step: StepPropose, Duration: s.proposeTimeout})
+		s.timeouts.Schedule(Timeout{Height: s.height, Round: round, Step: StepPropose, Duration: BackoffDuration(s.proposeTimeout, round)})
 		if s.proposal != nil {
 			// A buffered proposal was already promoted for this
 			// (height, round) by enterNewHeight — no need to wait.
@@ -488,7 +488,7 @@ func (s *State) enterPropose(round uint32) {
 
 	s.proposal = prop
 	s.broadcast(Message{Proposal: prop})
-	s.timeouts.Schedule(Timeout{Height: s.height, Round: round, Step: StepPropose, Duration: s.proposeTimeout})
+	s.timeouts.Schedule(Timeout{Height: s.height, Round: round, Step: StepPropose, Duration: BackoffDuration(s.proposeTimeout, round)})
 	s.enterPrevote(round)
 }
 
@@ -515,7 +515,7 @@ func (s *State) enterPrevote(round uint32) {
 	}
 
 	s.logTransition("enter-prevote", voteHash)
-	s.timeouts.Schedule(Timeout{Height: s.height, Round: round, Step: StepPrevote, Duration: s.prevoteTimeout})
+	s.timeouts.Schedule(Timeout{Height: s.height, Round: round, Step: StepPrevote, Duration: BackoffDuration(s.prevoteTimeout, round)})
 	s.signAndSendVote(VoteTypePrevote, voteHash)
 }
 
@@ -557,7 +557,7 @@ func (s *State) enterPrecommit(round uint32) {
 	}
 
 	s.logTransition("enter-precommit", precommitHash)
-	s.timeouts.Schedule(Timeout{Height: s.height, Round: round, Step: StepPrecommit, Duration: s.precommitTimeout})
+	s.timeouts.Schedule(Timeout{Height: s.height, Round: round, Step: StepPrecommit, Duration: BackoffDuration(s.precommitTimeout, round)})
 	s.signAndSendVote(VoteTypePrecommit, precommitHash)
 }
 

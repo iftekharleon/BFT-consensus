@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -83,4 +84,28 @@ func (tm *TimeoutManager) Stop() {
 	if tm.timer != nil {
 		tm.timer.Stop()
 	}
+}
+
+// backoffCapMultiplier bounds exponential timeout growth at 10x the base
+// duration. Growth must be capped — otherwise a chain that's gone through
+// several round changes takes exponentially longer to even ATTEMPT
+// recovery, which turns a transient network blip into a near-permanent
+// stall. 10x keeps late rounds patient without becoming glacial.
+const backoffCapMultiplier = 10.0
+
+// BackoffDuration returns the timeout duration for a given round: base
+// for round 0, growing as base * 1.5^round and capped at
+// backoffCapMultiplier * base. Growth is mandatory, not cosmetic — under
+// a network partition or a genuinely slow validator set, a fixed
+// per-step timeout causes endless round churn where no round is ever
+// given enough time to actually converge before the next one begins.
+func BackoffDuration(base time.Duration, round uint32) time.Duration {
+	if round == 0 {
+		return base
+	}
+	multiplier := math.Pow(1.5, float64(round))
+	if multiplier > backoffCapMultiplier {
+		multiplier = backoffCapMultiplier
+	}
+	return time.Duration(float64(base) * multiplier)
 }
